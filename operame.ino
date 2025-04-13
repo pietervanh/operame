@@ -13,17 +13,17 @@
 #include <list>
 #include <operame_strings.h>
 #include <Adafruit_Sensor.h>
-#include <DHT.h>
+//#include <DHT.h>
 //#include <DHT_U.h>
 #include "Stream.h"
 
 
 #define LANGUAGE "nl"
 
-#define DHTPIN 15    // Digital pin connected to the DHT sensor
+//#define DHTPIN 15    // Digital pin connected to the DHT sensor
 // Uncomment the type of sensor in use:
 //#define DHTTYPE    DHT11     // DHT 11
-#define DHTTYPE    DHT22     // DHT 22 (AM2302)
+//#define DHTTYPE    DHT22     // DHT 22 (AM2302)
 //#define DHTTYPE    DHT21     // DHT 21 (AM2301)
 
 OperameLanguage::Texts T;
@@ -38,7 +38,7 @@ TFT_eSprite       sprite(&display);
 MHZ19             mhz;
 WiFiClient	  wificlient;
 WiFiClientSecure  wificlientsecure;
-DHT             dht(DHTPIN, DHTTYPE);
+//DHT             dht(DHTPIN, DHTTYPE);
 
 const int       pin_portalbutton = 35;
 const int       pin_demobutton   = 0;
@@ -70,6 +70,8 @@ bool            add_units;
 bool            wifi_enabled;
 bool            mqtt_enabled;
 int             max_failures;
+bool            backlight_enabled;
+String          mqtt_topic_backlight;  // Topic for controlling backlight via MQTT
 
 // REST configuration via WiFiSettings
 unsigned long   rest_interval;
@@ -114,12 +116,12 @@ void display_3(const String& co2, const String& temp, const String& hum, int fg 
     sprite.setTextFont(8);
     sprite.setTextDatum(MC_DATUM);
     sprite.setTextColor(fg, bg);
-    sprite.drawString(co2, display.width()/2, display.height()/2 - 25);
-    sprite.setTextFont(4);
-    sprite.setTextDatum(ML_DATUM);
-    sprite.drawString(temp, 10, display.height() - 15);
-    sprite.setTextDatum(MR_DATUM);
-    sprite.drawString(hum, display.width() - 10, display.height() - 15);
+    sprite.drawString(co2, display.width()/2, display.height()/2);
+    // sprite.setTextFont(4);
+    // sprite.setTextDatum(ML_DATUM);
+    // sprite.drawString(temp, 10, display.height() - 15);
+    // sprite.setTextDatum(MR_DATUM);
+    // sprite.drawString(hum, display.width() - 10, display.height() - 15);
 
     sprite.pushSprite(0, 0);
 }
@@ -291,7 +293,8 @@ void connect_mqtt() {
     if( mqtt_user_pass_enabled ) {
         if (mqtt.connect(WiFiSettings.hostname.c_str(), mqtt_username.c_str(), mqtt_password.c_str())) {
             failures = 0;
-	    display_big("MQTT connect");
+	        display_big("MQTT connect");
+            mqtt.subscribe(mqtt_topic_backlight.c_str());  // Subscribe to backlight control topic
         } else {
             failures++;
             if (failures >= max_failures) panic(T.error_mqtt);
@@ -300,10 +303,21 @@ void connect_mqtt() {
     else {
         if (mqtt.connect(WiFiSettings.hostname.c_str())) {
             failures = 0;
+            mqtt.subscribe(mqtt_topic_backlight.c_str());  // Subscribe to backlight control topic
         } else {
             failures++;
             if (failures >= max_failures) panic(T.error_mqtt);
         }
+    }
+}
+
+// MQTT message callback handler
+void messageReceived(String &topic, String &payload) {
+    if (topic == mqtt_topic_backlight) {
+        backlight_enabled = (payload == "ON" || payload == "1" || payload == "true");
+        // Publish state back to status topic (remove /set from topic)
+        retain(mqtt_topic_backlight.substring(0, mqtt_topic_backlight.length()-4), 
+               backlight_enabled ? "ON" : "OFF");
     }
 }
 
@@ -461,7 +475,7 @@ void setup() {
     }
 
     // Initialize DHT device.
-    dht.begin();
+    //dht.begin();
     
     for (auto& str : T.portal_instructions[0]) {
         str.replace("{ssid}", WiFiSettings.hostname);
@@ -469,6 +483,9 @@ void setup() {
 
     wifi_enabled  = WiFiSettings.checkbox("operame_wifi", false, T.config_wifi);
     ota_enabled   = WiFiSettings.checkbox("operame_ota", false, T.config_ota) && wifi_enabled;
+
+    WiFiSettings.heading("Display");
+    backlight_enabled = WiFiSettings.checkbox("display_backlight", true, "Enable display backlight");
 
     WiFiSettings.heading("CO2-niveaus");
     co2_warning   = WiFiSettings.integer("operame_co2_warning", 400, 5000, 700, T.config_co2_warning);
@@ -488,6 +505,7 @@ void setup() {
     mqtt_temp_hum_enabled = WiFiSettings.checkbox("operame_mqtt_temp_hum", false, T.config_mqtt_temp_hum);
     mqtt_topic_temperature  = WiFiSettings.string("operame_mqtt_topic_temperature", WiFiSettings.hostname + "/t", T.config_mqtt_topic_temperature);
     mqtt_topic_humidity  = WiFiSettings.string("operame_mqtt_topic_humidity", WiFiSettings.hostname + "/h", T.config_mqtt_topic_humidity);
+    mqtt_topic_backlight = WiFiSettings.string("operame_mqtt_topic_backlight", WiFiSettings.hostname + "/backlight", "Topic for backlight control");
 //    mqtt_template_temp_hum_enabled = WiFiSettings.checkbox("operame_mqtt_template_temp_hum_enabled", false, T.config_mqtt_template_temp_hum_enabled);
 //    mqtt_template_temp = WiFiSettings.string("operame_mqtt_template_temp", "{} C", T.config_mqtt_template_temp);
 //    mqtt_template_hum = WiFiSettings.string("operame_mqtt_template_hum", "{} %R.H.", T.config_mqtt_template_hum);
@@ -543,11 +561,12 @@ void setup() {
 
     if (wifi_enabled) WiFiSettings.connect(false, 15);
 
-    if (mqtt_enabled) mqtt.begin(server.c_str(), port, wificlient);
+    if (mqtt_enabled) {
+        mqtt.begin(server.c_str(), port, wificlient);
+        mqtt.onMessage(messageReceived);
+    }
 
     if (rest_cert_enabled) wificlientsecure.setCACert(rest_cert.c_str());
-
-    if (ota_enabled) setup_ota();
 }
 
 void post_rest_message(DynamicJsonDocument message, Stream& stream) {
@@ -570,26 +589,29 @@ void loop() {
     static float t;
     static bool first_boot = true;
 
+    // Set backlight state according to configuration
+    digitalWrite(pin_backlight, backlight_enabled ? HIGH : LOW);
+
     if(first_boot)
     {
         co2 = get_co2();
-        h = dht.readHumidity();
-        t = dht.readTemperature();        
+        //h = dht.readHumidity();
+        //t = dht.readTemperature();        
         first_boot = false;
     }
     
     every(60000) {
         // Read CO2, humidity and temperature 
         co2 = get_co2();
-        h = dht.readHumidity();
-        t = dht.readTemperature();
+        //h = dht.readHumidity();
+        //t = dht.readTemperature();
         // Print data to serial port
         Serial.print(co2);
-        Serial.print(",");
-        Serial.print(t);
-        Serial.print(",");
-        Serial.print(h);
-        Serial.println();
+        //Serial.print(",");
+        //Serial.print(t);
+        //Serial.print(",");
+        //Serial.print(h);
+        //Serial.println();
     }
 
     every(50) {

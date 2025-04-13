@@ -1,3 +1,8 @@
+# Changes in this fork
+
+Add a new setting to turn on / off backlight via settings or via mqtt topic /backlight
+Also commented out the Temp Humidity stuff since I got an older one with no DHT attached
+
 # Operame
 
 Dit is de broncode van de firmware voor de [ControlCO2-meter](https://controlco2.space), operame project origineel gestart door RevSpace.
